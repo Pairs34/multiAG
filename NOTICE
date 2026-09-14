@@ -1,0 +1,9 @@
+multiAG is an independent community project.
+
+9Router interoperability: https://github.com/decolua/9router
+9Router is a separate MIT-licensed project by decolua and contributors.
+No 9Router implementation is bundled with this source package.
+
+Antigravity and Google product names belong to their respective owners.
+This package contains the community bridge, not IDE binaries or decompiled
+third-party implementation notes.

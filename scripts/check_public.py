@@ -11,7 +11,7 @@ ROOT_FILES = frozenset({
 })
 SOURCE_DIRS = frozenset({'cmd', 'internal', 'scripts', 'tests', 'docs', '.github'})
 PRIVATE_DIRS = frozenset({'.local', '.git', '.agents', '.codex', 'bin', 'dist', '__pycache__'})
-SOURCE_SUFFIXES = frozenset({'.go', '.py', '.md', '.html', '.sh', '.yml', '.yaml'})
+SOURCE_SUFFIXES = frozenset({'.go', '.py', '.ps1', '.md', '.html', '.sh', '.yml', '.yaml'})
 PATTERNS = (
     ('API key', re.compile(r'\bsk-[A-Za-z0-9_-]{16,}')),
     ('OAuth token', re.compile(r'\bya29\.[A-Za-z0-9_-]{16,}')),

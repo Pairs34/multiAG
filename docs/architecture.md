@@ -38,6 +38,6 @@ Google `VALIDATED` tool mode maps to OpenAI `auto`: it permits either text or a 
 
 ## Verification boundary
 
-Real Linux validation used IDE 1.107.0, cloud router generation, streaming text, and an agent tool round trip. Unit tests use synthetic payloads and mock HTTP transports. Cross-compilation covers Windows and macOS binaries; native sessions on those systems remain unverified. Linux service enablement and restart after SIGTERM were observed; a full reboot was not tested.
+Real Linux validation used IDE 1.107.0, cloud router generation, streaming text, and an agent tool round trip. Unit tests use synthetic payloads and mock HTTP transports. Native Windows validation covers the build and a local mock-router `setup`, `status`, `restart`, and `stop` lifecycle, including settings restoration and owned-process verification; a real Windows IDE request remains unverified. macOS is a cross-compilation target. Linux service enablement and restart after SIGTERM were observed; a full reboot was not tested.
 
 This is an experimental integration with an undocumented endpoint contract. Future IDE or router updates may require adapter changes. Quota metadata and autocomplete remain tied to the IDE login, so this bridge is not complete account virtualization.

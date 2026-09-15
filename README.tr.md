@@ -17,7 +17,13 @@ go build -trimpath -buildvcs=false -o bin/agrouter ./cmd/agrouter
 python3 scripts/router_trial.py setup --router https://router.example.com --wire-format openai
 ```
 
-Windows PowerShell:
+Windows PowerShell (önerilen):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1 -Router "https://router.example.com"
+```
+
+Betik Windows EXE'sini derler, API anahtarını gizli olarak sorar ve köprüyü görünür bir konsol açmadan başlatır. Elle çalıştırmak isterseniz:
 
 ```powershell
 go build -trimpath -buildvcs=false -o bin/agrouter.exe ./cmd/agrouter
@@ -32,7 +38,7 @@ Paneli açmak için:
 python3 scripts/router_trial.py panel
 ```
 
-Windows'ta `python3` yerine `python` kullanın. Model alanını boş bırakınca IDE seçimi izlenir. Paneldeki değişiklikler sonraki isteklere uygulanır; IDE'nin yeniden başlatılması gerekmez.
+Windows'ta `python3` yerine `python` kullanın. Model alanını boş bırakınca IDE seçimi izlenir. Paneldeki değişiklikler sonraki isteklere uygulanır; IDE'nin yeniden başlatılması gerekmez. Windows'ta `status`, `restart` ve `stop` desteklenir; kayıtlı PID kapatılmadan önce EXE yolu ve işlem başlangıç kimliği doğrulanır.
 
 Linux'ta kullanıcı oturumuyla otomatik başlatma:
 
@@ -46,11 +52,11 @@ Google'a dönüş:
 python3 scripts/router_trial.py stop
 ```
 
-Ardından IDE penceresini yeniden yükleyin. Windows/macOS'ta köprü işlemini ayrıca kapatın. Ayrıntılar [kurulum belgesinde](docs/setup.md).
+Ardından IDE penceresini yeniden yükleyin. Windows'ta `stop` köprü işlemini de güvenli biçimde kapatır; macOS'ta işlem ayrıca kapatılmalıdır. Ayrıntılar [kurulum belgesinde](docs/setup.md).
 
 ## Destek durumu
 
-Gerçek Linux IDE oturumunda metin akışı ve araç çağrısı doğrulandı. Windows/macOS için çapraz derleme kontrolü yapılır; bu platformlarda gerçek IDE entegrasyonu henüz doğrulanmadı. Kullanılan IDE ayarı belgelenmemiştir ve güncellemelerle değişebilir.
+Gerçek Linux IDE oturumunda metin akışı ve araç çağrısı doğrulandı. Windows'ta yerel derleme ile `setup`, `status`, `restart` ve `stop` süreç yaşam döngüsü doğrulandı; gerçek Windows IDE isteği henüz doğrulanmadı. macOS yalnız çapraz derleme hedefidir. Kullanılan IDE ayarı belgelenmemiştir ve güncellemelerle değişebilir.
 
 Agent mesajları, ilgili proje bağlamı ve araç sonuçları router'a gider. IDE oturum bilgileri, kota sorguları ve tab tamamlama Google tarafında kalır. IDE'de görünen kota, router havuzunun toplam kotası değildir. Desteklenmeyen medya/araç biçimleri ve diğer sınırlar [mimari belgesindedir](docs/architecture.md).
 

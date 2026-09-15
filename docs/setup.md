@@ -33,7 +33,7 @@ python3 scripts/router_trial.py status
 python3 scripts/router_trial.py panel
 ```
 
-The panel's model override and pause toggle are in memory. Restart preserves the current model override when the bridge is reachable; pause resets. Linux supports `restart`. Standalone restart on Windows/macOS is not automated because the controller deliberately does not signal an unverified PID.
+The panel's model override and pause toggle are in memory. Restart preserves the current model override when the bridge is reachable; pause resets. Linux and Windows support `restart`. On Windows, the controller verifies the recorded executable path and process creation time before terminating a PID. Standalone restart on macOS is not automated because the controller deliberately does not signal an unverified PID.
 
 ## Linux user service
 
@@ -58,6 +58,6 @@ Normally run the controller's `stop` action, then reload the IDE window. If the 
 
 For manual recovery, open IDE user settings and remove only the `jetski.cloudCodeUrl` property while keeping JSON syntax valid, then reload the window. Preserve your other settings. If a Linux service exists, disable and stop it using `systemctl --user disable --now multiag-router.service`.
 
-On Windows/macOS, `stop` restores settings but does not terminate the detached process. Close only the bridge process associated with this installation, using the PID recorded in private state **before** running stop and verifying its executable path in your OS process manager. Never stop processes by a broad application name. Afterward, fresh setup can be run again.
+On Windows, `stop` restores settings and terminates the bridge only after verifying the recorded executable path and process creation time. On macOS, close only the bridge process associated with this installation, using the PID recorded in private state **before** running stop and verifying its executable path in your OS process manager. Never stop processes by a broad application name. Afterward, fresh setup can be run again.
 
 A model request that fails is not automatically retried through the IDE account. Inspect panel counters and private logs, verify the router model list, and check provider availability in the router dashboard. Do not attach raw state, keys, prompts, or logs to public issues.

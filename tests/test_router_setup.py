@@ -62,6 +62,13 @@ class SettingsTests(unittest.TestCase):
                 stop_owned_bridge({'pid': 123, 'binary': 'synthetic'})
             kill.assert_not_called()
 
+    def test_windows_uses_verified_process_stop(self):
+        state = {'pid': 123, 'binary': 'synthetic.exe', 'processStart': 456}
+        with patch('router_trial.sys.platform', 'win32'), \
+             patch('router_trial._stop_owned_windows_bridge') as stop:
+            stop_owned_bridge(state)
+        stop.assert_called_once_with(state)
+
     def test_service_path_quoting_and_invalid_newline(self):
         self.assertEqual(unit_quote('a % "b"'), '"a %% \\"b\\""')
         with self.assertRaises(RuntimeError):
@@ -92,11 +99,14 @@ class ControllerTests(unittest.TestCase):
              patch('router_trial.urllib.request.build_opener', return_value=opener), \
              patch('router_trial.urllib.request.urlopen', return_value=contextlib.closing(io.BytesIO(b'{}'))), \
              patch('router_trial.subprocess.Popen', return_value=child) as launch, \
+             patch('router_trial._windows_process_start', return_value=456), \
              contextlib.redirect_stdout(io.StringIO()):
             main()
         state = json.loads((self.state_dir / 'state.json').read_text())
         self.assertEqual(state['router'], 'https://router.example.com')
         self.assertEqual(state['wireFormat'], 'openai')
+        if sys.platform == 'win32':
+            self.assertEqual(state['processStart'], 456)
         self.assertEqual((self.state_dir / 'api-key').read_text(), 'synthetic\n')
         self.assertEqual((self.state_dir / 'settings.before.jsonc').read_text(), self.original)
         self.assertEqual(self.settings.read_text().replace(state['insertion'], '', 1), self.original)
@@ -105,6 +115,32 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(launch.call_args.kwargs['env']['AG_ROUTER_API_KEY'], 'synthetic')
         request = opener.open.call_args.args[0]
         self.assertEqual(request.full_url, 'https://router.example.com/v1/models')
+
+    def test_explicit_settings_does_not_probe_default_location(self):
+        child = Mock(pid=123)
+        child.poll.return_value = None
+        opener = Mock()
+        opener.open.return_value = contextlib.closing(io.BytesIO(b'{"data": []}'))
+        with patch('sys.argv', self.argv), patch('router_trial.default_settings',
+                                                side_effect=AssertionError('unexpected probe')), \
+             patch('router_trial.getpass.getpass', return_value='synthetic'), \
+             patch('router_trial.urllib.request.build_opener', return_value=opener), \
+             patch('router_trial.urllib.request.urlopen', return_value=contextlib.closing(io.BytesIO(b'{}'))), \
+             patch('router_trial.subprocess.Popen', return_value=child), \
+             patch('router_trial._windows_process_start', return_value=456), \
+             contextlib.redirect_stdout(io.StringIO()):
+            main()
+
+    def test_status_uses_state_without_probing_default_settings(self):
+        self.state_dir.mkdir()
+        (self.state_dir / 'state.json').write_text(json.dumps({'endpoint': 'http://example.test'}))
+        argv = ['router_trial.py', 'status', '--state-dir', str(self.state_dir)]
+        with patch('sys.argv', argv), patch('router_trial.default_settings',
+                                           side_effect=AssertionError('unexpected probe')), \
+             patch('router_trial.urllib.request.urlopen',
+                   return_value=contextlib.closing(io.BytesIO(b'{}'))), \
+             contextlib.redirect_stdout(io.StringIO()):
+            main()
 
     def test_failed_preflight_does_not_launch_or_change_settings(self):
         opener = Mock()

@@ -17,7 +17,13 @@ go build -trimpath -buildvcs=false -o bin/agrouter ./cmd/agrouter
 python3 scripts/router_trial.py setup --router https://router.example.com --wire-format openai
 ```
 
-On Windows, use PowerShell:
+On Windows, the recommended PowerShell setup is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1 -Router "https://router.example.com"
+```
+
+The script builds the Windows executable, prompts for the API key without echoing it, and launches the bridge without a visible console. To run the steps manually:
 
 ```powershell
 go build -trimpath -buildvcs=false -o bin/agrouter.exe ./cmd/agrouter
@@ -32,7 +38,7 @@ Reload the IDE window after the first setup. Open the panel:
 python3 scripts/router_trial.py panel
 ```
 
-Use `python` instead of `python3` on Windows. Linux and macOS also provide `sh router-panel.sh`. Leave the model override empty to follow the IDE's model selection. Changes in the panel apply to subsequent requests without restarting the IDE. The panel links to your router dashboard for account management.
+Use `python` instead of `python3` on Windows. Linux and macOS also provide `sh router-panel.sh`. Leave the model override empty to follow the IDE's model selection. Changes in the panel apply to subsequent requests without restarting the IDE. The panel links to your router dashboard for account management. Windows supports `status`, `restart`, and `stop`; before stopping a recorded PID, the controller verifies its executable path and process start identity.
 
 ## Optional Linux autostart
 
@@ -51,11 +57,11 @@ This copies the application and private configuration out of the source director
 python3 scripts/router_trial.py stop
 ```
 
-Reload the IDE window afterward. The controller removes its inserted setting while preserving other edits. For a managed Linux installation, it also disables and stops the service. On Windows and macOS, stop restores the setting but the bridge process must be closed separately; see [recovery](docs/setup.md).
+Reload the IDE window afterward. The controller removes its inserted setting while preserving other edits. For a managed Linux installation, it also disables and stops the service. On Windows, stop also terminates the verified bridge process. On macOS, the bridge process must still be closed separately; see [recovery](docs/setup.md).
 
 ## Compatibility and data flow
 
-Linux was tested with a real Antigravity IDE 1.107.0 session, streamed responses, and a tool round trip. Windows and macOS binaries are cross-compilation targets; native IDE integration on those systems remains unverified. The IDE setting is undocumented and may change between releases.
+Linux was tested with a real Antigravity IDE 1.107.0 session, streamed responses, and a tool round trip. Windows was tested natively for build and the `setup`, `status`, `restart`, and `stop` process lifecycle; a real Windows IDE request remains unverified. macOS remains a cross-compilation target. The IDE setting is undocumented and may change between releases.
 
 Agent prompts, relevant project context, and tool results travel to your router and its provider. IDE OAuth credentials are kept on the Google metadata route and are not forwarded to 9Router. Login, quota metadata, and tab completion continue to use the IDE account. Consequently, the IDE quota display does not represent the router pool.
 

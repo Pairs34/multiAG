@@ -18,6 +18,92 @@ import urllib.parse
 import webbrowser
 
 
+def _windows_process_info(pid, terminate=False):
+    """Return an open Windows process handle plus its executable and start time."""
+    import ctypes
+    import ctypes.wintypes
+
+    access = 0x1000 | 0x00100000  # QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+    if terminate:
+        access |= 0x0001  # PROCESS_TERMINATE
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL,
+                                     ctypes.wintypes.DWORD]
+    kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.wintypes.HANDLE,
+                                                    ctypes.wintypes.DWORD,
+                                                    ctypes.wintypes.LPWSTR,
+                                                    ctypes.POINTER(ctypes.wintypes.DWORD)]
+    kernel32.QueryFullProcessImageNameW.restype = ctypes.wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = [ctypes.wintypes.HANDLE,
+                                        ctypes.POINTER(ctypes.wintypes.FILETIME),
+                                        ctypes.POINTER(ctypes.wintypes.FILETIME),
+                                        ctypes.POINTER(ctypes.wintypes.FILETIME),
+                                        ctypes.POINTER(ctypes.wintypes.FILETIME)]
+    kernel32.GetProcessTimes.restype = ctypes.wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    handle = kernel32.OpenProcess(access, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: the PID no longer exists.
+            return None
+        raise ctypes.WinError(error)
+    try:
+        path = ctypes.create_unicode_buffer(32768)
+        size = ctypes.wintypes.DWORD(len(path))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        created = ctypes.wintypes.FILETIME()
+        exited = ctypes.wintypes.FILETIME()
+        kernel = ctypes.wintypes.FILETIME()
+        user = ctypes.wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                        ctypes.byref(kernel), ctypes.byref(user)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        started = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return handle, os.path.normcase(os.path.realpath(path.value)), started, kernel32
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _windows_process_start(pid):
+    info = _windows_process_info(pid)
+    if info is None:
+        return None
+    handle, _, started, kernel32 = info
+    kernel32.CloseHandle(handle)
+    return started
+
+
+def _stop_owned_windows_bridge(state):
+    """Terminate only the exact Windows process recorded by this installation."""
+    import ctypes
+    import ctypes.wintypes
+
+    info = _windows_process_info(state['pid'], terminate=True)
+    if info is None:
+        return
+    handle, actual, started, kernel32 = info
+    try:
+        expected = os.path.normcase(os.path.realpath(state['binary']))
+        if actual != expected:
+            raise RuntimeError('Bridge PID belongs to another executable; no process was signalled.')
+        if state.get('processStart') is not None and started != state['processStart']:
+            raise RuntimeError('Bridge PID was reused by another process; no process was signalled.')
+        kernel32.TerminateProcess.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
+        kernel32.TerminateProcess.restype = ctypes.wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = ctypes.wintypes.DWORD
+        if not kernel32.TerminateProcess(handle, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if kernel32.WaitForSingleObject(handle, 5000) == 258:  # WAIT_TIMEOUT
+            raise RuntimeError('Bridge did not stop within five seconds.')
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def default_settings():
     if sys.platform == 'win32':
         root = pathlib.Path(os.environ['APPDATA'])
@@ -111,6 +197,9 @@ def replace_settings(path, data):
 
 
 def stop_owned_bridge(state):
+    if sys.platform == 'win32':
+        _stop_owned_windows_bridge(state)
+        return
     if not sys.platform.startswith('linux'):
         raise RuntimeError('Stop the bridge using its console on this platform; no process was signalled.')
     actual = pathlib.Path('/proc') / str(state['pid']) / 'exe'
@@ -174,13 +263,16 @@ def main():
     p.add_argument('--router', help='9Router base URL; remembered on restart')
     p.add_argument('--api-key-file', type=pathlib.Path, help='private API key file; never passed on the command line')
     p.add_argument('--wire-format', choices=['native','openai'], help='router API compatibility mode; remembered on restart')
-    p.add_argument('--settings', type=pathlib.Path, default=default_settings())
+    p.add_argument('--settings', type=pathlib.Path,
+                   help='IDE user settings.json; auto-detected when omitted')
     p.add_argument('--state-dir', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parent.parent / '.local/router-trial')
     p.add_argument('--model', default='')
     p.add_argument('--open-ide', action='store_true')
     p.add_argument('--ide', default=shutil.which('antigravity-ide') or shutil.which('antigravity') or 'antigravity')
     p.add_argument('--debug-port', type=int, default=0)
     a = p.parse_args()
+    if a.settings is None and a.action in ('setup', 'start'):
+        a.settings = default_settings()
     a.state_dir = a.state_dir.resolve()
     if a.action == 'serve':
         serve_from_state(a.state_dir)
@@ -240,7 +332,7 @@ def main():
                 raise RuntimeError('Endpoint setting changed; refusing to overwrite your settings. Bridge kept running.')
             if state.get('managedUnit') == MANAGED_UNIT:
                 subprocess.run(['systemctl', '--user', 'disable', '--now', MANAGED_UNIT], check=True)
-            elif sys.platform.startswith('linux'):
+            elif sys.platform.startswith('linux') or sys.platform == 'win32':
                 stop_owned_bridge(state)
             else:
                 print('Settings restored. Close the bridge process using its console on this platform.')
@@ -312,9 +404,11 @@ def main():
     if previous is None:
         private_write(a.state_dir / 'settings.before.jsonc', original)
     logfd = os.open(str(a.state_dir / 'bridge.log'), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    launch_options = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+                      if os.name == 'nt' else {'start_new_session': True})
     with os.fdopen(logfd, 'a') as log:
         child = subprocess.Popen([str(binary), '--router', router, '--model', a.model, '--wire-format', wire_format], env=env, stdin=subprocess.DEVNULL,
-                                 stdout=log, stderr=log, start_new_session=True)
+                                 stdout=log, stderr=log, **launch_options)
     try:
         for _ in range(30):
             if child.poll() is not None:
@@ -329,6 +423,13 @@ def main():
         state = dict(endpoint=endpoint, insertion=insertion, settings=str(a.settings.resolve()),
                      binary=str(binary), pid=child.pid, model=a.model, router=router,
                      apiKeyFile=str(keyfile) if keyfile else None, wireFormat=wire_format)
+        if sys.platform == 'win32':
+            try:
+                state['processStart'] = _windows_process_start(child.pid)
+            except OSError:
+                # The executable path is still verified before stopping; this
+                # token adds PID-reuse protection when Windows permits access.
+                pass
         private_write(statefile, json.dumps(state))
         if previous is None:
             replace_settings(a.settings, original[:first + 1] + insertion + original[first + 1:])

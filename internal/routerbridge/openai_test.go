@@ -41,6 +41,18 @@ func TestCompatibilityRequestPreservesImagesAndRepeatedToolResults(t *testing.T)
 	}
 }
 
+func TestCompatibilityRequestAcceptsSnakeCaseInlineImage(t *testing.T) {
+	var payload map[string]json.RawMessage
+	json.Unmarshal([]byte(`{"model":"ag/gemini-3.8-flash-high","request":{"contents":[{"role":"user","parts":[{"inline_data":{"mime_type":"image/png","data":"YQ=="}}]}]}}`), &payload)
+	encoded, err := nativeToOpenAI(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "data:image/png;base64,YQ==") {
+		t.Fatal("snake_case inline image was not preserved")
+	}
+}
+
 const openAIStream = `data: {"id":"r1","model":"gemini-3.8-flash-high","choices":[{"index":0,"delta":{"reasoning_content":"thought","tool_calls":[{"index":0,"function":{"name":"pwd","arguments":"{\"x\":"}}]}}]}
 
 data: {"id":"r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}]}
@@ -52,13 +64,13 @@ data: [DONE]
 
 func TestCompatibilityStreamEmitsCompleteToolsAndUsage(t *testing.T) {
 	frames := []map[string]any{}
-	err := openAIToNative(strings.NewReader(openAIStream), func(data []byte) error {
+	err := openAIToNativeStream(strings.NewReader(openAIStream), func(data []byte) error {
 		var frame map[string]any
 		json.Unmarshal(data, &frame)
 		frames = append(frames, frame)
 		return nil
 	})
-	if err != nil || len(frames) != 3 {
+	if err != nil || len(frames) != 2 {
 		t.Fatal("bad stream", err, len(frames))
 	}
 	first := frames[0]["response"].(map[string]any)["candidates"].([]any)[0].(map[string]any)["content"].(map[string]any)["parts"].([]any)
@@ -69,8 +81,12 @@ func TestCompatibilityStreamEmitsCompleteToolsAndUsage(t *testing.T) {
 	if second["name"] != "pwd" || second["args"].(map[string]any)["x"] != float64(1) {
 		t.Fatal("tool call damaged")
 	}
-	if frames[2]["response"].(map[string]any)["usageMetadata"].(map[string]any)["totalTokenCount"] != float64(5) {
-		t.Fatal("usage lost")
+	for _, frame := range frames {
+		response := frame["response"].(map[string]any)
+		candidates, ok := response["candidates"].([]any)
+		if !ok || len(candidates) == 0 {
+			t.Fatal("candidate-less frame emitted")
+		}
 	}
 }
 

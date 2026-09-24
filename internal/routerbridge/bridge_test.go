@@ -2,12 +2,28 @@ package routerbridge
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type failAfterReader struct {
+	data []byte
+	done bool
+}
+
+func (r *failAfterReader) Read(p []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		return copy(p, r.data), nil
+	}
+	return 0, errors.New("synthetic stream interruption")
+}
+
+func (r *failAfterReader) Close() error { return nil }
 
 type transportFunc func(*http.Request) (*http.Response, error)
 
@@ -128,5 +144,36 @@ func TestRemoteRouterRequiresHTTPS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("valid router rejected: %s: %v", address, err)
 		}
+	}
+}
+
+func TestInterruptedCompatibilityStreamEndsWithNativeCandidate(t *testing.T) {
+	sse := []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n")
+	b, err := New(Options{RouterURL: "https://router.example", UpstreamURL: "https://cloudcode-pa.googleapis.com", APIKey: "router", Capability: capability, WireFormat: "openai", Client: &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &failAfterReader{data: sse}}, nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/"+capability+"/v1internal:streamGenerateContent", strings.NewReader(`{"model":"gemini-3.8-flash-high","request":{"contents":[{"role":"user","parts":[{"text":"test"}]}]}}`))
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, r)
+	if w.Code != 200 || strings.Contains(w.Body.String(), `data: {"error"`) || !strings.Contains(w.Body.String(), "Router stream interrupted") || !strings.Contains(w.Body.String(), `"finishReason":"STOP"`) {
+		t.Fatal("stream was not terminated safely", w.Code, w.Body.String())
+	}
+}
+
+func TestCompatibilityStreamFailureBeforeFirstFrameReturnsBadGateway(t *testing.T) {
+	b, err := New(Options{RouterURL: "https://router.example", UpstreamURL: "https://cloudcode-pa.googleapis.com", APIKey: "router", Capability: capability, WireFormat: "openai", Client: &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &failAfterReader{}}, nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/"+capability+"/v1internal:streamGenerateContent", strings.NewReader(`{"model":"gemini-3.8-flash-high","request":{"contents":[{"role":"user","parts":[{"text":"test"}]}]}}`))
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, r)
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), `"status":"UNAVAILABLE"`) {
+		t.Fatal("pre-stream failure was not returned as 502", w.Code, w.Body.String())
 	}
 }

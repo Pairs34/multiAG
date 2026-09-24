@@ -233,9 +233,13 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(key, v)
 		}
 	}
-	w.WriteHeader(res.StatusCode)
 	if isGeneration && b.opts.WireFormat == "openai" && path == "v1internal:streamGenerateContent" && res.StatusCode < 400 {
-		err := openAIToNative(res.Body, func(frame []byte) error {
+		wroteFrame := false
+		err := openAIToNativeStream(res.Body, func(frame []byte) error {
+			if !wroteFrame {
+				w.WriteHeader(res.StatusCode)
+				wroteFrame = true
+			}
 			if _, err := w.Write(append(append([]byte("data: "), frame...), []byte("\n\n")...)); err != nil {
 				return err
 			}
@@ -244,11 +248,24 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			b.mu.Lock()
 			b.failures++
+			b.lastError = err.Error()
 			b.mu.Unlock()
-			io.WriteString(w, "data: {\"error\":{\"message\":\"router stream conversion failed\"}}\n\n")
+			if !wroteFrame {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": http.StatusBadGateway, "message": "router stream failed before producing output", "status": "UNAVAILABLE"}})
+				return
+			}
+			// Once streaming has started it is too late for an HTTP error or safe
+			// account retry. A top-level error frame crashes affected IDE versions,
+			// so finish with a valid native candidate that leaves the editor usable.
+			terminal, _ := json.Marshal(map[string]any{"response": map[string]any{"candidates": []any{map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": "\n\nRouter stream interrupted. Please retry."}}}, "finishReason": "STOP"}}}})
+			io.WriteString(w, "data: "+string(terminal)+"\n\n")
+			http.NewResponseController(w).Flush()
 		}
 		return
 	}
+	w.WriteHeader(res.StatusCode)
 	// Flush each read so streaming does not wait for the entire response.
 	buf := make([]byte, 16<<10)
 	for {

@@ -61,8 +61,15 @@ func nativeToOpenAI(payload map[string]json.RawMessage) ([]byte, error) {
 					parts = append(parts, map[string]any{"type": "text", "text": text})
 				}
 			}
-			if image, ok := part["inlineData"].(map[string]any); ok {
+			image, hasImage := part["inlineData"].(map[string]any)
+			if !hasImage {
+				image, hasImage = part["inline_data"].(map[string]any)
+			}
+			if hasImage {
 				mime, _ := image["mimeType"].(string)
+				if mime == "" {
+					mime, _ = image["mime_type"].(string)
+				}
 				data, _ := image["data"].(string)
 				if !strings.HasPrefix(mime, "image/") {
 					return nil, errors.New("unsupported inline media")
@@ -211,6 +218,14 @@ func normalizeToolSchema(value any) any {
 }
 
 func openAIToNative(reader io.Reader, emit func([]byte) error) error {
+	return openAIToNativeMode(reader, emit, true)
+}
+
+func openAIToNativeStream(reader io.Reader, emit func([]byte) error) error {
+	return openAIToNativeMode(reader, emit, false)
+}
+
+func openAIToNativeMode(reader io.Reader, emit func([]byte) error, emitUsageOnly bool) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 2<<20)
 	type toolCall struct{ Name, Arguments string }
@@ -345,7 +360,12 @@ func openAIToNative(reader io.Reader, emit func([]byte) error) error {
 		if chunk.Usage != nil {
 			response["usageMetadata"] = map[string]any{"promptTokenCount": chunk.Usage.PromptTokens, "candidatesTokenCount": chunk.Usage.CompletionTokens, "totalTokenCount": chunk.Usage.TotalTokens}
 		}
-		if len(candidates) > 0 || chunk.Usage != nil {
+		// Some routers send usage in a separate, candidate-less event. The IDE
+		// stream consumer assumes a response event has a candidate and can crash
+		// while dereferencing a usage-only frame. Router-side accounting retains
+		// this data, so streaming callers suppress that frame. Non-stream callers
+		// keep it so collectGeneration can merge usage into the final response.
+		if len(candidates) > 0 || (emitUsageOnly && chunk.Usage != nil) {
 			encoded, _ := json.Marshal(map[string]any{"response": response})
 			if err := emit(encoded); err != nil {
 				return err

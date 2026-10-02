@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type failAfterReader struct {
@@ -175,5 +176,64 @@ func TestCompatibilityStreamFailureBeforeFirstFrameReturnsBadGateway(t *testing.
 	b.ServeHTTP(w, r)
 	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), `"status":"UNAVAILABLE"`) {
 		t.Fatal("pre-stream failure was not returned as 502", w.Code, w.Body.String())
+	}
+}
+
+func TestQuotaErrorDropsRetryHintsSoIDEDoesNotWait(t *testing.T) {
+	body := `{"error":{"code":429,"message":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h56m32s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"10592s"}]}}`
+	b, err := New(Options{RouterURL: "https://router.example", UpstreamURL: "https://cloudcode-pa.googleapis.com", APIKey: "router", Capability: capability, WireFormat: "openai", Client: &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 429, Header: http.Header{"Content-Type": []string{"application/json"}, "Retry-After": []string{"10592"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/"+capability+"/v1internal:streamGenerateContent", strings.NewReader(`{"model":"claude-opus-4-6-thinking","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`))
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, r)
+	out := w.Body.String()
+	if w.Code != 429 || w.Header().Get("Retry-After") != "" || strings.Contains(out, "retryDelay") || strings.Contains(out, "2h56m") || !strings.Contains(out, "Individual quota reached") || !strings.Contains(out, "RESOURCE_EXHAUSTED") {
+		t.Fatal("quota error not sanitized", w.Code, w.Header(), out)
+	}
+	if !strings.Contains(b.lastError, "2h56m32s") {
+		t.Fatal("original reset time should stay visible in health", b.lastError)
+	}
+}
+
+func TestSilentRouterIsAbortedByStallWatchdog(t *testing.T) {
+	b, err := New(Options{RouterURL: "https://router.example", UpstreamURL: "https://cloudcode-pa.googleapis.com", APIKey: "router", Capability: capability, StallTimeout: 50 * time.Millisecond, Client: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/"+capability+"/v1internal:streamGenerateContent", strings.NewReader(`{"model":"gemini-3.8-flash-high","request":{"contents":[]}}`))
+	w := httptest.NewRecorder()
+	start := time.Now()
+	b.ServeHTTP(w, r)
+	if time.Since(start) > 5*time.Second || w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), "DEADLINE_EXCEEDED") {
+		t.Fatal("stalled request was not aborted", w.Code, w.Body.String())
+	}
+}
+
+func TestStalledStreamAfterFirstBytesEndsWithNativeCandidate(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+		// then nothing: the router goes silent without closing the connection
+	}()
+	b, err := New(Options{RouterURL: "https://router.example", UpstreamURL: "https://cloudcode-pa.googleapis.com", APIKey: "router", Capability: capability, WireFormat: "openai", StallTimeout: 100 * time.Millisecond, Client: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		go func() { <-r.Context().Done(); pw.CloseWithError(r.Context().Err()) }()
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: pr}, nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/"+capability+"/v1internal:streamGenerateContent", strings.NewReader(`{"model":"gemini-3.8-flash-high","request":{"contents":[{"role":"user","parts":[{"text":"test"}]}]}}`))
+	w := httptest.NewRecorder()
+	start := time.Now()
+	b.ServeHTTP(w, r)
+	if time.Since(start) > 5*time.Second || !strings.Contains(w.Body.String(), "partial") || !strings.Contains(w.Body.String(), "Router stream interrupted") {
+		t.Fatal("silent stream was not terminated cleanly", w.Body.String())
 	}
 }

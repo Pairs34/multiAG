@@ -21,13 +21,29 @@ func main() {
 	upstream := flag.String("upstream", "https://cloudcode-pa.googleapis.com", "Google metadata endpoint")
 	model := flag.String("model", "", "optional fixed router model")
 	wireFormat := flag.String("wire-format", "native", "router request format: native or openai")
+	stall := flag.Duration("stall-timeout", 2*time.Minute, "abort a router request that sends no bytes for this long")
 	flag.Parse()
 	host, _, err := net.SplitHostPort(*listen)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		fmt.Fprintln(os.Stderr, "listen must use a loopback IP")
 		os.Exit(1)
 	}
-	b, err := routerbridge.New(routerbridge.Options{RouterURL: *router, UpstreamURL: *upstream, APIKey: os.Getenv("AG_ROUTER_API_KEY"), Capability: os.Getenv("AG_ROUTER_CAPABILITY"), Model: *model, WireFormat: *wireFormat})
+	var debugRaw, debugFrames *os.File
+	if dir := os.Getenv("AG_ROUTER_DEBUG_DIR"); dir != "" {
+		debugRaw, err = os.OpenFile(dir+string(os.PathSeparator)+"router-raw.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		if err == nil {
+			debugFrames, err = os.OpenFile(dir+string(os.PathSeparator)+"ide-frames.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cannot open debug logs:", err)
+			os.Exit(1)
+		}
+	}
+	options := routerbridge.Options{RouterURL: *router, UpstreamURL: *upstream, APIKey: os.Getenv("AG_ROUTER_API_KEY"), Capability: os.Getenv("AG_ROUTER_CAPABILITY"), Model: *model, WireFormat: *wireFormat, StallTimeout: *stall}
+	if debugRaw != nil {
+		options.DebugRaw, options.DebugFrames = debugRaw, debugFrames
+	}
+	b, err := routerbridge.New(options)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

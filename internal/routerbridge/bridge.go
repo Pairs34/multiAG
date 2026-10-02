@@ -2,8 +2,10 @@ package routerbridge
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,10 +15,22 @@ import (
 	"time"
 )
 
+const (
+	defaultStallTimeout = 2 * time.Minute
+	maxRequestDuration  = 30 * time.Minute
+)
+
 // Options contains runtime credentials; callers must not log them.
 type Options struct {
 	RouterURL, UpstreamURL, APIKey, Capability, Model, WireFormat string
 	Client                                                        *http.Client
+	// StallTimeout aborts a router request that sends no bytes (headers or body)
+	// for this long. Zero selects the default.
+	StallTimeout time.Duration
+	// DebugRaw and DebugFrames, when set, receive the router's raw event stream
+	// and the converted IDE frames of streaming generations. They contain model
+	// output, so they are only enabled explicitly for troubleshooting.
+	DebugRaw, DebugFrames io.Writer
 }
 
 type Bridge struct {
@@ -48,13 +62,25 @@ func New(opts Options) (*Bridge, error) {
 		return nil, errors.New("API key and a long URL capability are required")
 	}
 	if opts.Client == nil {
-		opts.Client = &http.Client{Timeout: 5 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		// No overall Client.Timeout: it would kill healthy long streams. Stalls are
+		// handled by the per-request inactivity watchdog in ServeHTTP.
+		opts.Client = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	}
+	if opts.StallTimeout <= 0 {
+		opts.StallTimeout = defaultStallTimeout
 	}
 	opts.RouterURL = strings.TrimRight(opts.RouterURL, "/")
 	return &Bridge{opts: opts, model: opts.Model}, nil
 }
 
 func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rec := &statusRecorder{ResponseWriter: w}
+	start := time.Now()
+	b.serve(rec, r)
+	b.logRequest(r, rec, time.Since(start))
+}
+
+func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// A random base path also prevents websites from using this local bridge.
@@ -104,15 +130,18 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]json.RawMessage
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20))
 		if err := dec.Decode(&payload); err != nil || payload == nil {
+			b.setLastError(fmt.Sprintf("invalid generation JSON from IDE (encoding %q): %v", r.Header.Get("Content-Encoding"), err))
 			http.Error(w, "invalid generation JSON", 400)
 			return
 		}
 		if err := dec.Decode(new(any)); err != io.EOF {
+			b.setLastError("invalid trailing JSON from IDE")
 			http.Error(w, "invalid trailing JSON", 400)
 			return
 		}
 		json.Unmarshal(payload["model"], &model)
 		if model == "" {
+			b.setLastError("generation request from IDE has no model")
 			http.Error(w, "missing model", 400)
 			return
 		}
@@ -149,7 +178,14 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			isGeneration = false
 		}
 	}
-	out, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
+	// A silent router (for example one cycling through exhausted accounts) must
+	// not hold the IDE request open indefinitely: the watchdog cancels the
+	// upstream request when no bytes arrive for StallTimeout.
+	ctx, cancel := context.WithTimeout(r.Context(), maxRequestDuration)
+	defer cancel()
+	watchdog := time.AfterFunc(b.opts.StallTimeout, cancel)
+	defer watchdog.Stop()
+	out, err := http.NewRequestWithContext(ctx, r.Method, target, body)
 	if err != nil {
 		http.Error(w, "invalid request", 400)
 		return
@@ -172,12 +208,22 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := b.opts.Client.Do(out)
 	if err != nil {
+		stalled := r.Context().Err() == nil && ctx.Err() != nil
 		b.mu.Lock()
 		b.failures++
+		if stalled {
+			b.lastError = fmt.Sprintf("router sent nothing for %s; request aborted", b.opts.StallTimeout)
+		}
 		b.mu.Unlock()
+		if stalled {
+			writeGoogleError(w, http.StatusGatewayTimeout, "DEADLINE_EXCEEDED", "router did not respond in time")
+			return
+		}
 		http.Error(w, "upstream connection failed", http.StatusBadGateway)
 		return
 	}
+	watchdog.Reset(b.opts.StallTimeout)
+	res.Body = &idleReader{ReadCloser: res.Body, timer: watchdog, idle: b.opts.StallTimeout}
 	defer res.Body.Close()
 	if isGeneration && b.opts.WireFormat == "openai" && res.StatusCode < 400 {
 		if !strings.Contains(res.Header.Get("Content-Type"), "text/event-stream") {
@@ -228,6 +274,10 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		b.failures++
 	}
 	b.mu.Unlock()
+	if isGeneration && res.StatusCode >= 400 {
+		b.writeRouterError(w, res)
+		return
+	}
 	for _, key := range []string{"Content-Type", "Retry-After"} {
 		if v := res.Header.Get(key); v != "" {
 			w.Header().Set(key, v)
@@ -235,7 +285,15 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if isGeneration && b.opts.WireFormat == "openai" && path == "v1internal:streamGenerateContent" && res.StatusCode < 400 {
 		wroteFrame := false
-		err := openAIToNativeStream(res.Body, func(frame []byte) error {
+		var source io.Reader = res.Body
+		if b.opts.DebugRaw != nil {
+			fmt.Fprintf(b.opts.DebugRaw, "\n--- %s\n", time.Now().Format(time.RFC3339Nano))
+			source = io.TeeReader(res.Body, b.opts.DebugRaw)
+		}
+		err := openAIToNativeStream(source, func(frame []byte) error {
+			if b.opts.DebugFrames != nil {
+				fmt.Fprintf(b.opts.DebugFrames, "%s data: %s\n", time.Now().Format(time.RFC3339Nano), frame)
+			}
 			if !wroteFrame {
 				w.WriteHeader(res.StatusCode)
 				wroteFrame = true

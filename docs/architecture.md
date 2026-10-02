@@ -19,6 +19,10 @@ The Go HTTP server binds to a loopback IP. A random capability path gates access
 
 Pause routes subsequent generation requests to Google using the IDE account. It does not cancel an in-flight router request. Account selection and failover belong to 9Router. A panel override changes the model, not the account identity.
 
+## Failure handling
+
+A router request that sends no bytes for `--stall-timeout` (default 2 minutes) is aborted, so a router cycling through exhausted accounts cannot hold the IDE indefinitely. Streams that are still producing data are not cut off. Failed router generation responses (HTTP 4xx/5xx) are replaced with a plain Google-style error: `Retry-After`, `RetryInfo`, and "Resets in …" hints are removed so the IDE does not wait out a whole quota window. The original message, including the reset time, is kept in `lastError` on `/health`.
+
 ## Wire formats
 
 | Mode | Behavior |

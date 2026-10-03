@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"sort"
 	"strings"
 )
@@ -71,13 +72,29 @@ func nativeToOpenAI(payload map[string]json.RawMessage) ([]byte, error) {
 					mime, _ = image["mime_type"].(string)
 				}
 				data, _ := image["data"].(string)
-				if !strings.HasPrefix(mime, "image/") {
-					return nil, errors.New("unsupported inline media")
+				raw, err := base64.StdEncoding.DecodeString(data)
+				if err != nil {
+					return nil, errors.New("invalid inline media data")
 				}
-				if _, err := base64.StdEncoding.DecodeString(data); err != nil {
-					return nil, errors.New("invalid image data")
+				switch {
+				case strings.HasPrefix(mime, "image/"):
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mime + ";base64," + data}})
+				case isTextMime(mime):
+					// Chat completions have no text-file part: inline the content.
+					parts = append(parts, map[string]any{"type": "text", "text": "[Attached file, " + mime + "]\n" + string(raw)})
+				case mime == "application/pdf":
+					parts = append(parts, map[string]any{"type": "file", "file": map[string]any{"filename": "attachment.pdf", "file_data": "data:" + mime + ";base64," + data}})
+				default:
+					return nil, errors.New("unsupported inline media type " + mime)
 				}
-				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + mime + ";base64," + data}})
+			}
+			for key := range part {
+				switch key {
+				case "text", "thought", "thoughtSignature", "inlineData", "inline_data", "fileData", "functionCall", "functionResponse":
+				default:
+					// Keys only, never content: shows what the IDE sends that is not converted.
+					log.Printf("ignored content part key %q", key)
+				}
 			}
 			if _, ok := part["fileData"]; ok {
 				return nil, errors.New("file URI media is not supported in compatibility mode")
@@ -376,4 +393,15 @@ func openAIToNativeMode(reader io.Reader, emit func([]byte) error, emitUsageOnly
 		return err
 	}
 	return checkEnd()
+}
+
+func isTextMime(mime string) bool {
+	if strings.HasPrefix(mime, "text/") {
+		return true
+	}
+	switch mime {
+	case "application/json", "application/xml", "application/x-yaml", "application/yaml", "application/javascript", "application/x-sh", "application/sql", "application/toml":
+		return true
+	}
+	return strings.HasSuffix(mime, "+json") || strings.HasSuffix(mime, "+xml")
 }

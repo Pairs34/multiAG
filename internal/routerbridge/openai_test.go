@@ -53,6 +53,24 @@ func TestCompatibilityRequestAcceptsSnakeCaseInlineImage(t *testing.T) {
 	}
 }
 
+func TestCompatibilityRequestConvertsDocumentAttachments(t *testing.T) {
+	convert := func(mime string) (string, error) {
+		var payload map[string]json.RawMessage
+		json.Unmarshal([]byte(`{"model":"ag/m","request":{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"`+mime+`","data":"aGVsbG8="}}]}]}}`), &payload)
+		encoded, err := nativeToOpenAI(payload)
+		return string(encoded), err
+	}
+	if out, err := convert("text/plain"); err != nil || !strings.Contains(out, "hello") {
+		t.Fatalf("text attachment not inlined: %v %s", err, out)
+	}
+	if out, err := convert("application/pdf"); err != nil || !strings.Contains(out, `"type":"file"`) || !strings.Contains(out, "data:application/pdf;base64,aGVsbG8=") {
+		t.Fatalf("pdf attachment not sent as file part: %v %s", err, out)
+	}
+	if _, err := convert("application/zip"); err == nil {
+		t.Fatal("unknown binary attachment must fail explicitly")
+	}
+}
+
 const openAIStream = `data: {"id":"r1","model":"gemini-3.8-flash-high","choices":[{"index":0,"delta":{"reasoning_content":"thought","tool_calls":[{"index":0,"function":{"name":"pwd","arguments":"{\"x\":"}}]}}]}
 
 data: {"id":"r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}]}

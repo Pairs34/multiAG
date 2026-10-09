@@ -20,6 +20,18 @@ const (
 	maxRequestDuration  = 30 * time.Minute
 )
 
+var hopByHopHeaders = map[string]bool{
+	"Connection":          true,
+	"Proxy-Connection":    true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailer":             true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+}
+
 // Options contains runtime credentials; callers must not log them.
 type Options struct {
 	RouterURL, UpstreamURL, APIKey, Capability, Model, WireFormat string
@@ -190,20 +202,23 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", 400)
 		return
 	}
-	// Only explicit headers are forwarded. IDE OAuth never reaches the router.
-	for _, key := range []string{"Content-Type", "Accept", "User-Agent"} {
-		if value := r.Header.Get(key); value != "" {
-			out.Header.Set(key, value)
-		}
-	}
 	if isGeneration {
-		out.Header.Set("Authorization", "Bearer "+b.opts.APIKey)
-		out.Header.Set("Content-Type", "application/json")
-	} else {
-		for _, key := range []string{"Authorization", "X-Goog-User-Project", "X-Goog-Api-Client"} {
+		// Only explicit headers are forwarded to the router. IDE OAuth and local headers never reach the router.
+		for _, key := range []string{"Content-Type", "Accept", "User-Agent"} {
 			if value := r.Header.Get(key); value != "" {
 				out.Header.Set(key, value)
 			}
+		}
+		out.Header.Set("Authorization", "Bearer "+b.opts.APIKey)
+		out.Header.Set("Content-Type", "application/json")
+	} else {
+		// Forward all authentic IDE client headers (X-Goog-*, X-Aicode-*, Authorization, etc.) to Google upstream verbatim.
+		for k, vv := range r.Header {
+			canonical := http.CanonicalHeaderKey(k)
+			if hopByHopHeaders[canonical] || canonical == "Host" {
+				continue
+			}
+			out.Header[canonical] = vv
 		}
 	}
 	res, err := b.opts.Client.Do(out)
@@ -278,9 +293,19 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 		b.writeRouterError(w, res)
 		return
 	}
-	for _, key := range []string{"Content-Type", "Retry-After"} {
-		if v := res.Header.Get(key); v != "" {
-			w.Header().Set(key, v)
+	if isGeneration {
+		for _, key := range []string{"Content-Type", "Retry-After"} {
+			if v := res.Header.Get(key); v != "" {
+				w.Header().Set(key, v)
+			}
+		}
+	} else {
+		for k, vv := range res.Header {
+			canonical := http.CanonicalHeaderKey(k)
+			if hopByHopHeaders[canonical] || canonical == "Content-Length" {
+				continue
+			}
+			w.Header()[canonical] = vv
 		}
 	}
 	if isGeneration && b.opts.WireFormat == "openai" && path == "v1internal:streamGenerateContent" && res.StatusCode < 400 {

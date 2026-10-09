@@ -10,7 +10,7 @@ ROOT_FILES = frozenset({
     'SECURITY.md', 'go.mod', '.gitignore', '.gitattributes', 'router-panel.sh',
 })
 SOURCE_DIRS = frozenset({'cmd', 'internal', 'scripts', 'tests', 'docs', '.github'})
-PRIVATE_DIRS = frozenset({'.local', '.git', '.agents', '.codex', 'bin', 'dist', '__pycache__'})
+PRIVATE_DIRS = frozenset({'.local', '.git', '.agents', '.codex', '.serena', 'bin', 'dist', '__pycache__'})
 SOURCE_SUFFIXES = frozenset({'.go', '.py', '.ps1', '.md', '.html', '.sh', '.yml', '.yaml'})
 PATTERNS = (
     ('API key', re.compile(r'\bsk-[A-Za-z0-9_-]{16,}')),
